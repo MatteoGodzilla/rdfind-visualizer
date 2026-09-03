@@ -12,6 +12,8 @@ enum SortType {
     Copies,
 }
 
+const PADDING : i32 = 2;
+
 impl std::fmt::Display for SortType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -27,8 +29,16 @@ impl std::fmt::Display for SortType {
     }
 }
 
+#[derive(PartialEq)]
+enum Mode {
+    BrowsingList,
+    EditingFilter,
+    OpenedGroup,
+    Closed
+}
+
 struct State<'a> {
-    running: bool,
+    mode: Mode,
     //main data
     groups: HashMap<i64, rdfind::RDGroup<'a>>,
     shown: Vec<i64>,
@@ -39,74 +49,136 @@ struct State<'a> {
     sort: SortType,
     flipped: bool,
     name_filter: String, //implementing number filters is too hard for now
-    editing_filter: bool,
+    //vertical scrolling
+    entry_offset: usize,
+    vertical_offset: usize,
+    selected_group_id: Option<i64>
 }
 
 fn handle_input(window: &pancurses::Window, state: &mut State){
-    if state.editing_filter {
-        match window.getch() {
-            Some(pancurses::Input::Character('\t')) | Some(pancurses::Input::Character('\n')) => {
-                state.needs_list_refresh = true;
-                state.needs_screen_refresh = true;
-                state.editing_filter = false;
-            },
-            Some(pancurses::Input::Character('\u{7f}')) => {
-                //backspace
-                state.name_filter.pop();
-                state.needs_screen_refresh = true;
+    match state.mode {
+        Mode::BrowsingList => {
+            match window.getch() {
+                Some(pancurses::Input::Character('q')) => {
+                    state.mode = Mode::Closed;
+                },
+                Some(pancurses::Input::Character('S')) => {
+                    //cycle backwards on sorting types 
+                    state.sort = match state.sort {
+                        SortType::Id => SortType::Copies,
+                        SortType::Depth => SortType::Id,
+                        SortType::Size => SortType::Depth,
+                        SortType::Device => SortType::Size,
+                        SortType::Inode => SortType::Device,
+                        SortType::Priority => SortType::Inode,
+                        SortType::Name => SortType::Priority,
+                        SortType::Copies => SortType::Name,
+                    };
+                    state.needs_list_refresh = true;
+                    state.needs_screen_refresh = true;
+                }
+                Some(pancurses::Input::Character('s')) => {
+                    //cycle forwards on sorting types
+                    state.sort = match state.sort {
+                        SortType::Id => SortType::Depth,
+                        SortType::Depth => SortType::Size,
+                        SortType::Size => SortType::Device,
+                        SortType::Device => SortType::Inode,
+                        SortType::Inode => SortType::Priority,
+                        SortType::Priority => SortType::Name,
+                        SortType::Name => SortType::Copies,
+                        SortType::Copies => SortType::Id,
+                    };
+                    state.needs_list_refresh = true;
+                    state.needs_screen_refresh = true;
+                },
+                Some(pancurses::Input::Character('f')) => {
+                    //flip list
+                    state.flipped = !state.flipped;
+                    state.needs_screen_refresh = true;
+                },
+                Some(pancurses::Input::Character('/')) => {
+                    state.mode = Mode::EditingFilter;
+                    state.needs_screen_refresh = true;
+                },
+                Some(pancurses::Input::Character('j')) => {
+                    let entries = state.shown.len();
+                    state.entry_offset = if state.entry_offset + 1 < entries {
+                        state.entry_offset + 1
+                    } else {
+                        entries - 1
+                    };
+                   
+                    //adjust vertical offset
+                    let max_entries = (window.get_max_y() - PADDING) / 2 ;
+                    if state.entry_offset < state.vertical_offset {
+                        state.vertical_offset = state.entry_offset;
+                        state.needs_screen_refresh = true; 
+                    } else if state.entry_offset >= state.vertical_offset + max_entries as usize {
+                        state.vertical_offset = ((state.entry_offset as i32) - max_entries + 1) as usize;
+                        state.needs_screen_refresh = true; 
+                    }
+                },
+                Some(pancurses::Input::Character('k')) => {
+                    state.entry_offset = if state.entry_offset > 0 {
+                        state.entry_offset - 1
+                    } else {
+                        0 
+                    };
+                   
+                    //adjust vertical offset
+                    let max_entries = (window.get_max_y() - PADDING) / 2 ;
+                    if state.entry_offset < state.vertical_offset {
+                        state.vertical_offset = state.entry_offset;
+                        state.needs_screen_refresh = true; 
+                    } else if state.entry_offset >= state.vertical_offset + max_entries as usize {
+                        state.vertical_offset = ((state.entry_offset as i32) - max_entries + 1) as usize;
+                        state.needs_screen_refresh = true; 
+                    }
+                },
+                Some(pancurses::Input::Character('\n')) => {
+                    state.selected_group_id = Some(state.shown[state.entry_offset]);
+                    state.mode = Mode::OpenedGroup;
+                    state.needs_screen_refresh = true; 
+                }
+                _ => {}
             }
-            Some(pancurses::Input::Character(c)) => {
-                state.name_filter.push(c);
-                state.needs_screen_refresh = true;
+        },
+        Mode::EditingFilter => {
+            match window.getch() {
+                Some(pancurses::Input::Character('\n')) => {
+                    state.needs_list_refresh = true;
+                    state.needs_screen_refresh = true;
+                    state.mode = Mode::BrowsingList;
+                },
+                Some(pancurses::Input::Character('\u{7f}')) => {
+                    //backspace
+                    state.name_filter.pop();
+                    state.needs_screen_refresh = true;
+                }
+                Some(pancurses::Input::Character(c)) => {
+                    state.name_filter.push(c);
+                    state.needs_screen_refresh = true;
+                }
+                _ => {}
             }
-            _ => {}
-        }
-    } else {
-        match window.getch() {
-            Some(pancurses::Input::Character('q')) => {
-                state.running = false;
-            },
-            Some(pancurses::Input::Character('S')) => {
-                //cycle backwards on sorting types 
-                state.sort = match state.sort {
-                    SortType::Id => SortType::Copies,
-                    SortType::Depth => SortType::Id,
-                    SortType::Size => SortType::Depth,
-                    SortType::Device => SortType::Size,
-                    SortType::Inode => SortType::Device,
-                    SortType::Priority => SortType::Inode,
-                    SortType::Name => SortType::Priority,
-                    SortType::Copies => SortType::Name,
-                };
-                state.needs_list_refresh = true;
-                state.needs_screen_refresh = true;
-            }
-            Some(pancurses::Input::Character('s')) => {
-                //cycle forwards on sorting types
-                state.sort = match state.sort {
-                    SortType::Id => SortType::Depth,
-                    SortType::Depth => SortType::Size,
-                    SortType::Size => SortType::Device,
-                    SortType::Device => SortType::Inode,
-                    SortType::Inode => SortType::Priority,
-                    SortType::Priority => SortType::Name,
-                    SortType::Name => SortType::Copies,
-                    SortType::Copies => SortType::Id,
-                };
-                state.needs_list_refresh = true;
-                state.needs_screen_refresh = true;
-            },
-            Some(pancurses::Input::Character('f')) => {
-                //flip list
-                state.flipped = !state.flipped;
-                state.needs_screen_refresh = true;
-            },
-            Some(pancurses::Input::Character('\t')) => {
-                state.editing_filter = true;
-                state.needs_screen_refresh = true;
-            }
-            _ => {}
-        }
+        },
+        Mode::OpenedGroup => {
+            match window.getch() {
+                Some(pancurses::Input::Character('\u{1b}')) => {
+                    //escape
+                    state.mode = Mode::BrowsingList;
+                    state.needs_screen_refresh = true;
+                }
+                /*
+                Some(c) => {
+                    dbg!(c);
+                }
+                */
+                _ => {}
+            } 
+        },
+        Mode::Closed => {},
     }
 }
 
@@ -121,6 +193,8 @@ fn sort_pipeline<K, V, FnE, I, FnC, FnF, E>(groups: &HashMap<K,V>, extractor: Fn
 }
 
 fn recalculate_list(state: &mut State) {
+    state.vertical_offset = 0;
+    state.entry_offset = 0;
     state.shown.clear();
     //phase 1: filter
     let filtered = state.groups.iter().filter(|(_, group)| 
@@ -215,27 +289,64 @@ fn render_visible_list<'a, T>(window: &pancurses::Window, state: &'a State, iter
             ));
             row += 1;
         }
-        if row >= window.get_max_y() - 2 {
+        if row >= window.get_max_y() - PADDING {
             break
         }
     } 
 }
 
+fn render_single_group(window: &pancurses::Window, state: &State, group_id: i64){
+    let mut row = 0;
+    let max_cols = window.get_max_x() as usize;
+
+    window.mvprintw(row, 0, format!("Showing group {}", group_id));
+    row += 1;
+    let group = state.groups.get(&group_id);
+    if group.is_some() {
+        let group = group.unwrap();
+        window.mvprintw(row, 0, group.first.name.to_string());
+        row += 1;
+        for other in group.rest.iter() {
+            window.mvprintw(row, 0, other.name.to_string());
+            row += 1;
+            if row >= window.get_max_y() {
+                break
+            }
+
+        }
+    }
+}
+
 fn render(window: &pancurses::Window, state: &State){
     window.clear();
 
-    if state.flipped {
-        render_visible_list(window, state, state.shown.iter().rev());
-    } else {
-        render_visible_list(window, state, state.shown.iter());
+    match state.mode {
+        Mode::BrowsingList | Mode::EditingFilter => {
+            if state.flipped {
+                render_visible_list(window, state, state.shown.iter().rev().skip(state.vertical_offset));
+            } else {
+                render_visible_list(window, state, state.shown.iter().skip(state.vertical_offset));
+            }
+        },
+        Mode::OpenedGroup => {
+            if let Some(id) = state.selected_group_id {
+                render_single_group(window, state, id); 
+            }
+        },
+        Mode::Closed => {},
     }
+}
 
-    if state.editing_filter {
-        window.mvprintw(window.get_max_y() - 2, 0, "Editing filter");
+fn always_render(window: &pancurses::Window, state: &State){
+    if state.mode != Mode::OpenedGroup {
+        let bottom_right = format!("[{}/{}]", state.entry_offset + 1, state.shown.len());
+        window.mvprintw(window.get_max_y() - PADDING + 1, window.get_max_x() - bottom_right.len() as i32, bottom_right);
+        window.mvprintw(window.get_max_y() - PADDING + 1, 0, format!("Sorting (s): {}\tFilter (tab): {}", state.sort, state.name_filter));
+
+        if state.mode != Mode::EditingFilter{
+            window.mv((state.entry_offset as i32 - state.vertical_offset as i32) * 2,0);
+        }
     }
-    window.mvprintw(window.get_max_y() - 1, 0, format!("Entries: {}\tSorting (s): {}\tFilter (tab): {}", state.shown.len(), state.sort, state.name_filter));
-
-    window.refresh();
 }
 
 fn main() {
@@ -254,21 +365,23 @@ fn main() {
    
     let mut state = State {
         groups : groups,
-        running: true,
+        mode: Mode::BrowsingList,
         needs_screen_refresh: true,
         needs_list_refresh: true,
         shown: Vec::new(),
         sort: SortType::Size,
         flipped: false,
         name_filter: String::new(),
-        editing_filter: false
+        entry_offset:0,
+        vertical_offset:0,
+        selected_group_id: None
     };
 
     let window = pancurses::initscr();
     pancurses::noecho();
     window.nodelay(true);
 
-    while state.running {
+    while state.mode != Mode::Closed {
         handle_input(&window, &mut state); 
         if state.needs_list_refresh {
             recalculate_list(&mut state);
@@ -278,6 +391,8 @@ fn main() {
             render(&window, &state);
             state.needs_screen_refresh = false;
         }
+        always_render(&window, &state);
+        window.refresh();
     }
 
     pancurses::endwin(); 
